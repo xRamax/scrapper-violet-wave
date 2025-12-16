@@ -1,27 +1,32 @@
 import os
+from typing import Optional
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
+    # Variables obligatorias
     OPENAI_API_KEY: str
     TWILIO_ACCOUNT_SID: str
     TWILIO_AUTH_TOKEN: str
     TWILIO_PHONE_NUMBER: str
-    GOOGLE_CREDENTIALS_FILE: str
     GOOGLE_SHEET_NAME: str
     
-    # --- NUEVA VARIABLE (ESTO ES LO QUE FALTABA) ---
-    SLACK_WEBHOOK_URL: str 
-    APIFY_TOKEN: str
+    # --- CREDENCIALES DE GOOGLE (Doble sistema) ---
+    # Archivo físico (para local) - Lo hacemos opcional
+    GOOGLE_CREDENTIALS_FILE: Optional[str] = "google_credentials.json"
+    # Contenido JSON (para Railway) - Nuevo
+    GOOGLE_CREDENTIALS_JSON: Optional[str] = None
+    
+    # Otras variables (Opcionales para evitar errores si no están en .env)
+    SLACK_WEBHOOK_URL: Optional[str] = None
+    APIFY_TOKEN: Optional[str] = None
 
-    # Variables de Identidad (que agregamos antes)
+    # Variables de Identidad
     AGENT_NAME: str = "Pedro"
     COMPANY_NAME: str = "Violet Wave"
     NICHE: str = "Odontólogos y Clínicas Dentales"
 
     class Config:
         env_file = ".env"
-        # Esto permite que si hay variables extra en el .env que no usamos, no de error.
-        # Pero en este caso, SÍ queremos usar la de Slack, así que agregarla arriba es la solución correcta.
         extra = "ignore" 
 
 settings = Settings()

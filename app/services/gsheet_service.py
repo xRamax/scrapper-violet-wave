@@ -1,26 +1,58 @@
 import gspread
 import pandas as pd
 import re
+import json
+import os
+from google.oauth2.service_account import Credentials
 from app.core.config import settings
 
 class GSheetService:
     def __init__(self, spreadsheet_id=None):
         """
-        Si recibe spreadsheet_id, abre esa hoja específica.
-        Si no, abre la hoja por defecto del archivo de configuración.
+        Conecta a Google Sheets usando archivo físico O variable de entorno (Nube).
         """
-        self.client = gspread.service_account(filename=settings.GOOGLE_CREDENTIALS_FILE)
+        # Definimos los permisos necesarios
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive"
+        ]
+
+        creds = None
         
+        # 1. Intentar cargar desde Variable de Entorno (Railway/Nube)
+        # Esto permite pegar el contenido del JSON en una variable sin subir el archivo
+        if settings.GOOGLE_CREDENTIALS_JSON:
+            try:
+                # print("[INFO] Usando credenciales desde Variable de Entorno (JSON).") 
+                creds_dict = json.loads(settings.GOOGLE_CREDENTIALS_JSON)
+                creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+            except Exception as e:
+                print(f"[ERROR] Falló al leer GOOGLE_CREDENTIALS_JSON: {e}")
+
+        # 2. Si no funcionó lo anterior, intentar cargar desde Archivo (Local)
+        if not creds and settings.GOOGLE_CREDENTIALS_FILE:
+            if os.path.exists(settings.GOOGLE_CREDENTIALS_FILE):
+                # print(f"[INFO] Usando credenciales desde archivo: {settings.GOOGLE_CREDENTIALS_FILE}")
+                creds = Credentials.from_service_account_file(settings.GOOGLE_CREDENTIALS_FILE, scopes=scopes)
+            else:
+                # Solo avisamos si tampoco hay JSON, para no llenar el log de ruido
+                if not settings.GOOGLE_CREDENTIALS_JSON:
+                    print("[WARN] No se encontró el archivo de credenciales y no hay variable JSON.")
+
+        # 3. Autenticar cliente
+        if not creds:
+            raise Exception("❌ No se encontraron credenciales de Google válidas (ni archivo ni variable ENV).")
+
+        self.client = gspread.authorize(creds)
+        
+        # 4. Abrir la hoja correcta
         if spreadsheet_id:
-            # Abre por ID (el código largo de la URL)
             try:
                 self.sheet = self.client.open_by_key(spreadsheet_id).sheet1
             except Exception as e:
                 print(f"[ERROR] No pude abrir la hoja con ID {spreadsheet_id}. Error: {e}")
-                # Fallback: Si falla, intentamos abrir la default para no romper todo, o lanzamos error.
                 raise e
         else:
-            # Comportamiento por defecto (tu hoja maestra)
             self.sheet = self.client.open(settings.GOOGLE_SHEET_NAME).sheet1
 
     def load_new_leads(self) -> pd.DataFrame:
@@ -46,13 +78,11 @@ class GSheetService:
         Retorna un reporte con la cantidad de guardados y duplicados.
         """
         try:
-            # 1. Obtener todos los teléfonos actuales del Excel para comparar
             all_records = self.sheet.get_all_records()
             existing_df = pd.DataFrame(all_records)
             
             existing_phones = set()
             if not existing_df.empty and 'Phone' in existing_df.columns:
-                # Normalizamos los teléfonos existentes para comparar bien
                 existing_phones = set(self._normalize_phone(p) for p in existing_df['Phone'].astype(str))
 
             rows_to_add = []
@@ -63,33 +93,28 @@ class GSheetService:
                 raw_phone = lead.get('Phone', '')
                 clean_phone = self._normalize_phone(raw_phone)
                 
-                # LA REGLA DE ORO: Si el teléfono ya existe, LO SALTAMOS.
                 if clean_phone in existing_phones:
                     continue
                 
-                # Si es nuevo, lo preparamos
                 row = [
                     lead.get('Nombre', ''),
-                    raw_phone,   # Guardamos el original con formato
+                    raw_phone,   
                     "New", 
                     lead.get('Notas', '') 
                 ]
                 rows_to_add.append(row)
-                existing_phones.add(clean_phone) # Lo agregamos al set temporal para no duplicar en la misma carga
+                existing_phones.add(clean_phone) 
                 count_new += 1
 
-            # 2. Guardar en bloque
             if rows_to_add:
                 self.sheet.append_rows(rows_to_add)
                 print(f"[OK] Se agregaron {count_new} leads NUEVOS.")
             
-            # Calculamos los duplicados
             duplicates_count = total_processed - count_new
 
             if count_new == 0:
                 print("[AVISO] Todos los leads encontrados ya existian en el Excel.")
             
-            # Retornamos el reporte completo para el frontend
             return {
                 "added": count_new,
                 "duplicates": duplicates_count
@@ -100,48 +125,29 @@ class GSheetService:
             return {"added": 0, "duplicates": 0}
 
     def update_status_by_phone(self, target_phone: str, new_status: str):
-        """Busca el teléfono limpiando símbolos para asegurar coincidencia."""
         try:
-            # 1. Limpiamos el teléfono que buscamos
             target_clean = self._normalize_phone(target_phone)
-            
-            # 2. Traemos toda la columna de teléfonos
             headers = self.sheet.row_values(1)
             try:
-                # Buscamos 'Phone' o 'phone'
-                if 'Phone' in headers:
-                    phone_col_index = headers.index('Phone') + 1
-                elif 'phone' in headers:
-                    phone_col_index = headers.index('phone') + 1
-                else:
-                    # Si no encuentra, asume columna 2 (B)
-                    phone_col_index = 2
-                
+                if 'Phone' in headers: phone_col_index = headers.index('Phone') + 1
+                elif 'phone' in headers: phone_col_index = headers.index('phone') + 1
+                else: phone_col_index = 2
                 status_col_index = headers.index('Status') + 1
             except ValueError:
-                print("[ERROR] No encuentro columna Status en el Excel")
                 return False
 
             phone_column_values = self.sheet.col_values(phone_col_index)
-
-            # 3. Iteramos para encontrar coincidencia
             found_row = -1
-            
             for i, val in enumerate(phone_column_values):
                 val_clean = self._normalize_phone(val)
-                # Comparamos los últimos 8 dígitos
                 if val_clean and target_clean.endswith(val_clean[-8:]): 
                     found_row = i + 1
                     break
             
             if found_row > 1:
                 self.sheet.update_cell(found_row, status_col_index, new_status)
-                print(f"[OK] Excel actualizado en fila {found_row}: {new_status}")
                 return True
             else:
-                print(f"[WARN] Telefono {target_phone} no encontrado en Excel.")
                 return False
-
         except Exception as e:
-            print(f"[ERROR CRITICO] en Excel: {e}")
             return False
