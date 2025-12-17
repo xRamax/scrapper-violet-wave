@@ -2,8 +2,17 @@ fastapi
 uvicorn
 pandas
 gspread
+google-auth
 openai
 twilio
 apscheduler
 python-dotenv
 pydantic-settings
+requests
+apify-client
+sqlalchemy
+python-multipart
+python-jose[cryptography]
+passlib
+argon2-cffi
+bcrypt
